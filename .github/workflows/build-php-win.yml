@@ -8,9 +8,6 @@ permissions:
   contents: read
 
 on:
-  schedule:
-    # Every Friday at midnight UTC (matches the mobile build trigger).
-    - cron: '0 0 * * 5'
   workflow_dispatch:
     inputs:
       version:
@@ -30,9 +27,6 @@ env:
   GITHUB_TOKEN: ${{ github.token }}
   SPC_BUILD_OS: win
   # Each branch uploads to its own directory: main/, feature-x/, etc.
-  R2_PREFIX: ${{ format('{0}/', github.ref_name) }}
-  R2_ENDPOINT: https://713f4e1d515cf082921cdf5122bf1739.r2.cloudflarestorage.com
-  R2_BUCKET: nativephplibs
 
 jobs:
   build:
@@ -151,62 +145,3 @@ jobs:
           retention-days: 7
           # A re-run of this leg replaces the zip from the earlier attempt.
           overwrite: true
-
-  # Push every zip the build legs produced to R2, then regenerate the manifest
-  # from the full bucket listing and upload it last, so it never points at a
-  # missing object. This lives apart from the builds so a failed upload (bad
-  # R2 credentials, say) can be re-run on its own without rebuilding PHP.
-  publish:
-    needs: build
-    # Run even if some matrix legs failed, so whatever did build still ships.
-    if: always() && needs.build.result != 'cancelled'
-    runs-on: ubuntu-latest
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: php-*
-          path: dist
-          merge-multiple: true
-
-      - name: Upload binaries to R2
-        shell: bash
-        run: |
-          shopt -s nullglob
-          cd dist
-          for ZIP in desktop/*/*/*.zip; do
-            DEST="${R2_PREFIX}${ZIP}"
-            SHA=$(sha256sum "$ZIP" | awk '{print $1}')
-            echo "$SHA  $(basename "$ZIP")" > "$ZIP.sha256"
-
-            echo "Uploading $ZIP -> ${DEST} (sha256=$SHA)"
-            aws s3 cp "$ZIP" "s3://${R2_BUCKET}/${DEST}" \
-              --endpoint-url "$R2_ENDPOINT" \
-              --cache-control "no-cache, no-store"
-
-            aws s3 cp "$ZIP.sha256" "s3://${R2_BUCKET}/${DEST}.sha256" \
-              --endpoint-url "$R2_ENDPOINT" \
-              --content-type "text/plain" \
-              --cache-control "no-cache, no-store"
-          done
-
-      - name: Generate and upload versions.json
-        shell: bash
-        env:
-          BUCKET: ${{ env.R2_BUCKET }}
-          BASE_URL: https://bin.nativephp.com
-        run: |
-          chmod +x .github/scripts/generate-versions-json.sh
-          .github/scripts/generate-versions-json.sh > versions.json
-          echo "versions.json:"
-          cat versions.json
-
-          aws s3 cp versions.json "s3://${R2_BUCKET}/${R2_PREFIX}desktop/versions.json" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --content-type "application/json" \
-            --cache-control "no-cache, no-store"
